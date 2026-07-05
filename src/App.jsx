@@ -57,7 +57,10 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    // Só o onAuthStateChange: ele já entrega o estado atual assim que alguém se inscreve.
+    // Chamar getSession() em paralelo cria uma corrida — se essa promessa (iniciada
+    // antes do login) resolver depois do evento de login, ela sobrescreve a sessão
+    // válida com o valor antigo (null) que capturou no início.
     const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
