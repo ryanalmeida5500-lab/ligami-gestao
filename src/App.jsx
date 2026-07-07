@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import {
   Activity, Users, Calendar, Presentation, Stethoscope,
   Plus, Trash2, Check, X, ChevronRight, TrendingUp, MapPin, Clock,
-  Award, ListChecks, Medal, LogOut
+  Award, ListChecks, Medal, LogOut, Repeat
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -19,6 +19,7 @@ const C = {
   ecg: "#E63946",      // vermelho do traçado (do logo)
   monitor: "#3DDC84",  // verde monitor
   amber: "#F2B84B",
+  noite: "#3ECDE8",    // ciano — CTI noturno na rodagem
 };
 
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -28,24 +29,39 @@ const fmtData = (s) => {
   return `${d}/${m}/${y}`;
 };
 
-const emptyState = { ligantes: [], escalas: [], reunioes: [], eventos: [] };
+const DIAS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+const DIAS_LONGO = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira",
+  "Quinta-feira", "Sexta-feira", "Sábado"];
+const parseData = (s) => {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d);
+};
+// Soma dias a uma data "YYYY-MM-DD" sem cair em armadilha de fuso horário
+// (por isso monta a data com y/m/d locais em vez de `new Date(string)`).
+const addDias = (s, n) => {
+  const d = parseData(s);
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+const emptyState = { ligantes: [], reunioes: [], eventos: [], ciclos: [] };
 
 // ── Acesso a dados (Supabase) ─────────────────────────────
 async function fetchAll() {
-  const [ligantes, escalas, reunioes, eventos] = await Promise.all([
+  const [ligantes, reunioes, eventos, ciclos] = await Promise.all([
     supabase.from("ligantes").select("*"),
-    supabase.from("escalas").select("*"),
     supabase.from("reunioes").select("*"),
     supabase.from("eventos").select("*"),
+    supabase.from("ciclos").select("*"),
   ]);
-  for (const r of [ligantes, escalas, reunioes, eventos]) {
+  for (const r of [ligantes, reunioes, eventos, ciclos]) {
     if (r.error) throw r.error;
   }
   return {
     ligantes: ligantes.data,
-    escalas: escalas.data,
     reunioes: reunioes.data,
     eventos: eventos.data,
+    ciclos: ciclos.data,
   };
 }
 
@@ -113,7 +129,7 @@ export default function App() {
   const tabs = [
     { id: "dashboard", label: "Painel", icon: Activity },
     { id: "ligantes", label: "Ligantes", icon: Users },
-    { id: "escalas", label: "Escalas", icon: Stethoscope },
+    { id: "rodagem", label: "Escalas", icon: Stethoscope },
     { id: "reunioes", label: "Reuniões", icon: Calendar },
     { id: "presenca", label: "Presença", icon: Award },
     { id: "eventos", label: "Simpósios", icon: Presentation },
@@ -199,7 +215,7 @@ export default function App() {
       <main style={{ maxWidth: 1080, margin: "0 auto", padding: "24px 20px 60px" }}>
         {tab === "dashboard" && <Dashboard state={state} setTab={setTab} />}
         {tab === "ligantes" && <Ligantes state={state} mutate={mutate} />}
-        {tab === "escalas" && <Escalas state={state} mutate={mutate} />}
+        {tab === "rodagem" && <Rodagem state={state} mutate={mutate} />}
         {tab === "reunioes" && <Reunioes state={state} mutate={mutate} />}
         {tab === "presenca" && <Presenca state={state} setTab={setTab} />}
         {tab === "eventos" && <Eventos state={state} mutate={mutate} />}
@@ -359,15 +375,34 @@ function Dashboard({ state, setTab }) {
     return Math.round((soma / (rs.length * state.ligantes.length)) * 100);
   }, [state, hoje]);
 
-  const porLocal = useMemo(() => {
-    const cti = state.escalas.filter((e) => e.local === "CTI").length;
-    const upa = state.escalas.filter((e) => e.local === "UPA").length;
+  const nomeLigante = (id) => state.ligantes.find((l) => l.id === id)?.nome || "—";
+  const diaHoje = parseData(hoje).getDay();
+  const cicloAtivo = state.ciclos.find(
+    (c) => hoje >= c.inicio && hoje < addDias(c.inicio, c.semanas * 7));
+  const plantoesHoje = useMemo(() => {
+    if (!cicloAtivo) return [];
+    const lista = [];
+    (cicloAtivo.upa || []).forEach((a) => {
+      if (a.dia === diaHoje) lista.push({ local: "UPA", turno: "7h–19h", ligante_id: a.ligante_id, cor: C.amber });
+    });
+    (cicloAtivo.cti || []).forEach((a) => {
+      if (a.dia === diaHoje) lista.push({
+        local: "CTI", turno: a.turno === "dia" ? "Dia · 7h–19h" : "Noite · 19h–7h",
+        ligante_id: a.ligante_id, cor: a.turno === "dia" ? C.monitor : C.noite,
+      });
+    });
+    return lista;
+  }, [cicloAtivo, diaHoje]);
+
+  const distribuicaoCiclo = useMemo(() => {
+    const cti = cicloAtivo?.cti?.length || 0;
+    const upa = cicloAtivo?.upa?.length || 0;
     return { cti, upa, total: cti + upa };
-  }, [state]);
+  }, [cicloAtivo]);
 
   const stats = [
     { label: "Ligantes ativos", value: state.ligantes.length, icon: Users, go: "ligantes" },
-    { label: "Plantões escalados", value: porLocal.total, icon: Stethoscope, go: "escalas" },
+    { label: "Vagas no ciclo ativo", value: distribuicaoCiclo.total, icon: Stethoscope, go: "rodagem" },
     { label: "Reuniões registradas", value: state.reunioes.length, icon: Calendar, go: "reunioes" },
     { label: "Presença média", value: `${presencaMedia}%`, icon: TrendingUp, go: "reunioes", accent: true },
   ];
@@ -391,14 +426,38 @@ function Dashboard({ state, setTab }) {
         })}
       </div>
 
+      <Section title="Plantões de hoje" sub={DIAS_LONGO[diaHoje]}
+        action={cicloAtivo && (
+          <span style={{ fontSize: 12, color: C.dim }}>Ciclo: {cicloAtivo.nome}</span>
+        )}>
+        {!cicloAtivo ? (
+          <Empty>Nenhum ciclo de rodagem ativo hoje. Crie um na aba Escalas.</Empty>
+        ) : plantoesHoje.length === 0 ? (
+          <Empty>Sem plantões escalados para hoje neste ciclo.</Empty>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {plantoesHoje.map((p, i) => (
+              <Card key={i} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 9px",
+                  borderRadius: 6, background: `${p.cor}26`, color: p.cor }}>{p.local}</span>
+                <span style={{ fontWeight: 600, fontSize: 14, flex: 1 }}>{nomeLigante(p.ligante_id)}</span>
+                <span style={{ fontSize: 12, color: C.dim, display: "flex", alignItems: "center", gap: 5 }}>
+                  <Clock size={12} /> {p.turno}
+                </span>
+              </Card>
+            ))}
+          </div>
+        )}
+      </Section>
+
       {/* Barra CTI vs UPA */}
-      <Section title="Distribuição de plantões" sub="CTI × UPA">
-        {porLocal.total === 0 ? (
-          <Empty>Nenhum plantão escalado ainda.</Empty>
+      <Section title="Distribuição de plantões" sub={cicloAtivo ? `Ciclo ${cicloAtivo.nome} · CTI × UPA` : "CTI × UPA"}>
+        {distribuicaoCiclo.total === 0 ? (
+          <Empty>Nenhum ciclo de rodagem ativo hoje. Crie um na aba Escalas.</Empty>
         ) : (
           <Card>
-            <BarRow label="CTI" value={porLocal.cti} total={porLocal.total} color={C.ecg} />
-            <BarRow label="UPA" value={porLocal.upa} total={porLocal.total} color={C.amber} />
+            <BarRow label="CTI" value={distribuicaoCiclo.cti} total={distribuicaoCiclo.total} color={C.ecg} />
+            <BarRow label="UPA" value={distribuicaoCiclo.upa} total={distribuicaoCiclo.total} color={C.amber} />
           </Card>
         )}
       </Section>
@@ -485,11 +544,25 @@ function Ligantes({ state, mutate }) {
         .eq("id", r.id)
     ));
   };
+  // Ciclos guardam upa/cti como jsonb embutido — mesma lógica de limpeza manual.
+  const removerDosCiclos = async (liganteId) => {
+    const afetados = state.ciclos.filter((c) =>
+      c.upa?.some((a) => a.ligante_id === liganteId) || c.cti?.some((a) => a.ligante_id === liganteId));
+    await Promise.all(afetados.map((c) =>
+      supabase.from("ciclos").update({
+        upa: c.upa.filter((a) => a.ligante_id !== liganteId),
+        cti: c.cti.filter((a) => a.ligante_id !== liganteId),
+      }).eq("id", c.id)
+    ));
+  };
   const del = (id) => mutate(async () => {
     await removerDasReunioes(id);
+    await removerDosCiclos(id);
     // escalas do ligante são removidas automaticamente pelo "on delete cascade" no banco
     return supabase.from("ligantes").delete().eq("id", id);
   });
+  const toggleRodagem = (l) => mutate(() =>
+    supabase.from("ligantes").update({ na_rodagem: !l.na_rodagem }).eq("id", l.id));
 
   return (
     <Section title="Ligantes" sub="Membros da liga">
@@ -517,6 +590,14 @@ function Ligantes({ state, mutate }) {
                   textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.nome}</div>
                 {l.periodo && <div style={{ fontSize: 12, color: C.dim }}>{l.periodo} período</div>}
               </div>
+              <button onClick={() => toggleRodagem(l)} style={{
+                cursor: "pointer", background: l.na_rodagem ? "rgba(242,184,75,.15)" : "transparent",
+                border: `1px solid ${l.na_rodagem ? C.amber : C.line}`,
+                color: l.na_rodagem ? C.amber : C.dim,
+                borderRadius: 6, padding: "4px 9px", fontSize: 10.5, fontWeight: 700,
+                letterSpacing: "0.03em", whiteSpace: "nowrap" }}>
+                {l.na_rodagem ? "NA RODAGEM" : "SEM ESTÁGIO"}
+              </button>
               <Trash2 className="rowdel" size={16} color={C.dim}
                 style={{ cursor: "pointer" }} onClick={() => del(l.id)} />
             </Card>
@@ -526,68 +607,225 @@ function Ligantes({ state, mutate }) {
   );
 }
 
-// ── Escalas ───────────────────────────────────────────────
-function Escalas({ state, mutate }) {
-  const [f, setF] = useState({ liganteId: "", local: "CTI", data: "", turno: "Manhã" });
+// ── Rodagem (ciclos de estágio UPA / CTI) ─────────────────
+// UPA: até 7 ligantes, 1 por dia, 7h–19h, domingo a domingo.
+// CTI: até 14 ligantes, 1 no plantão dia e 1 no noturno por dia.
+// "Gerar próximo ciclo" troca os grupos: quem estava na UPA vai pro CTI,
+// e os 7 primeiros do CTI sobem pra UPA — todo mundo roda pelos dois setores.
+function Rodagem({ state, mutate }) {
+  const elegiveis = state.ligantes.filter((l) => l.na_rodagem);
+  const nomeDe = (id) => state.ligantes.find((l) => l.id === id)?.nome || "?";
 
-  const add = () => {
-    if (!f.liganteId || !f.data) return;
-    mutate(() => supabase.from("escalas").insert({
-      ligante_id: f.liganteId, local: f.local, data: f.data, turno: f.turno,
+  const [criando, setCriando] = useState(false);
+  const [nome, setNome] = useState("");
+  const [inicio, setInicio] = useState("");
+  const [semanas, setSemanas] = useState(8);
+  const [grupos, setGrupos] = useState({}); // ligante_id -> "upa" | "cti" | undefined
+
+  const contUpa = Object.values(grupos).filter((g) => g === "upa").length;
+  const contCti = Object.values(grupos).filter((g) => g === "cti").length;
+
+  const definirGrupo = (id, g) =>
+    setGrupos((prev) => ({ ...prev, [id]: prev[id] === g ? undefined : g }));
+
+  const salvarCiclo = () => {
+    if (!inicio || (contUpa === 0 && contCti === 0)) return;
+    const idsUpa = Object.keys(grupos).filter((id) => grupos[id] === "upa");
+    const idsCti = Object.keys(grupos).filter((id) => grupos[id] === "cti");
+    const upa = idsUpa.slice(0, 7).map((ligante_id, i) => ({ ligante_id, dia: i % 7 }));
+    const cti = idsCti.slice(0, 14).map((ligante_id, i) => ({
+      ligante_id, dia: i % 7, turno: i < 7 ? "dia" : "noite",
     }));
-    setF({ ...f, data: "" });
+    mutate(() => supabase.from("ciclos").insert({
+      nome: nome.trim() || `Ciclo ${state.ciclos.length + 1}`,
+      inicio, semanas: Number(semanas) || 8, upa, cti,
+    }));
+    setCriando(false); setNome(""); setInicio(""); setSemanas(8); setGrupos({});
   };
-  const del = (id) => mutate(() => supabase.from("escalas").delete().eq("id", id));
-  const nome = (id) => state.ligantes.find((l) => l.id === id)?.nome || "—";
 
-  const ordenadas = [...state.escalas].sort((a, b) => b.data.localeCompare(a.data));
+  const proximoCiclo = (c) => {
+    const idsUpaAntigos = (c.upa || []).map((a) => a.ligante_id);
+    const idsCtiAntigos = (c.cti || []).map((a) => a.ligante_id);
+    const novaUpa = idsCtiAntigos.slice(0, 7).map((ligante_id, i) => ({ ligante_id, dia: i % 7 }));
+    const novoCti = [...idsCtiAntigos.slice(7), ...idsUpaAntigos].slice(0, 14).map((ligante_id, i) => ({
+      ligante_id, dia: i % 7, turno: i < 7 ? "dia" : "noite",
+    }));
+    mutate(() => supabase.from("ciclos").insert({
+      nome: `${c.nome} → próximo`, inicio: addDias(c.inicio, c.semanas * 7),
+      semanas: c.semanas, upa: novaUpa, cti: novoCti,
+    }));
+  };
+
+  const mudarDia = (ciclo, local, ligante_id, campo, valor) => mutate(() => {
+    const arr = ciclo[local].map((a) => a.ligante_id !== ligante_id ? a :
+      { ...a, [campo]: campo === "dia" ? Number(valor) : valor });
+    return supabase.from("ciclos").update({ [local]: arr }).eq("id", ciclo.id);
+  });
+
+  const removerCiclo = (id) => mutate(() => supabase.from("ciclos").delete().eq("id", id));
 
   return (
-    <Section title="Escala de estágios" sub="CTI e UPA">
-      {state.ligantes.length === 0 ?
-        <Empty>Cadastre ligantes antes de montar a escala.</Empty> : (
-        <>
-          <Card style={{ marginBottom: 16, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <select style={{ ...inputStyle, flex: 2, minWidth: 150 }} value={f.liganteId}
-              onChange={(e) => setF({ ...f, liganteId: e.target.value })}>
-              <option value="">Selecionar ligante…</option>
-              {state.ligantes.map((l) => <option key={l.id} value={l.id}>{l.nome}</option>)}
-            </select>
-            <select style={{ ...inputStyle, flex: 1, minWidth: 90 }} value={f.local}
-              onChange={(e) => setF({ ...f, local: e.target.value })}>
-              <option>CTI</option><option>UPA</option>
-            </select>
-            <select style={{ ...inputStyle, flex: 1, minWidth: 100 }} value={f.turno}
-              onChange={(e) => setF({ ...f, turno: e.target.value })}>
-              <option>Manhã</option><option>Tarde</option><option>Noite</option>
-            </select>
-            <input type="date" style={{ ...inputStyle, flex: 1, minWidth: 140 }} value={f.data}
-              onChange={(e) => setF({ ...f, data: e.target.value })} />
-            <Btn onClick={add}><Plus size={15} /> Escalar</Btn>
-          </Card>
-
-          {ordenadas.length === 0 ? <Empty>Nenhum plantão escalado.</Empty> :
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {ordenadas.map((e) => (
-                <Card key={e.id} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <DateChip data={e.data} />
-                  <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 9px",
-                    borderRadius: 6, background: e.local === "CTI" ? "rgba(230,57,70,.15)" : "rgba(242,184,75,.15)",
-                    color: e.local === "CTI" ? C.ecg : C.amber }}>{e.local}</span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14 }}>{nome(e.ligante_id)}</div>
-                    <div style={{ fontSize: 12, color: C.dim, display: "flex", alignItems: "center", gap: 5 }}>
-                      <Clock size={12} /> {e.turno}
-                    </div>
-                  </div>
-                  <Trash2 className="rowdel" size={16} color={C.dim}
-                    style={{ cursor: "pointer" }} onClick={() => del(e.id)} />
-                </Card>
+    <Section title="Rodagem de estágios"
+      sub="UPA: até 7 ligantes, 1 por dia (7h–19h), domingo a domingo. CTI: até 14, 1 de dia e 1 de noite. Ciclos de 2 meses, trocando os grupos a cada novo ciclo.">
+      <Card style={{ marginBottom: 16 }}>
+        {!criando ? (
+          elegiveis.length === 0 ? (
+            <p style={{ fontSize: 13, color: C.dim, margin: 0 }}>
+              Marque ligantes como "na rodagem" na aba Ligantes antes de criar um ciclo.
+            </p>
+          ) : (
+            <Btn onClick={() => setCriando(true)}><Plus size={15} /> Criar novo ciclo</Btn>
+          )
+        ) : (
+          <div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+              <input style={{ ...inputStyle, flex: 2, minWidth: 180 }}
+                placeholder="Nome do ciclo (ex.: Jul–Ago 2026)" value={nome}
+                onChange={(e) => setNome(e.target.value)} />
+              <input type="date" style={{ ...inputStyle, flex: 1, minWidth: 140 }} value={inicio}
+                onChange={(e) => setInicio(e.target.value)} />
+              <input type="number" min={1} max={12} style={{ ...inputStyle, width: 90 }}
+                value={semanas} onChange={(e) => setSemanas(e.target.value)} title="Semanas" />
+              <span style={{ alignSelf: "center", fontSize: 12, color: C.dim }}>semanas</span>
+            </div>
+            <p style={{ fontSize: 12.5, color: C.dim, margin: "0 0 10px" }}>
+              Distribua os ligantes: <span style={{ color: C.amber }}>UPA {contUpa}/7</span> ·{" "}
+              <span style={{ color: C.monitor }}>CTI {contCti}/14</span>. A escala é gerada
+              automaticamente — cada ligante recebe um dia fixo da semana.
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))",
+              gap: 6, marginBottom: 14 }}>
+              {elegiveis.map((l) => (
+                <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 6,
+                  padding: "5px 8px", background: C.ink, borderRadius: 6, border: `1px solid ${C.line}` }}>
+                  <span style={{ fontSize: 12.5, flex: 1, overflow: "hidden", textOverflow: "ellipsis",
+                    whiteSpace: "nowrap" }}>{l.nome}</span>
+                  <button onClick={() => definirGrupo(l.id, "upa")}
+                    disabled={grupos[l.id] !== "upa" && contUpa >= 7}
+                    style={{ cursor: "pointer", fontSize: 11, padding: "3px 8px", borderRadius: 4,
+                      background: grupos[l.id] === "upa" ? C.amber : "transparent",
+                      color: grupos[l.id] === "upa" ? C.ink : C.amber,
+                      border: `1px solid ${C.amber}88`, fontWeight: 700,
+                      opacity: grupos[l.id] !== "upa" && contUpa >= 7 ? 0.35 : 1 }}>UPA</button>
+                  <button onClick={() => definirGrupo(l.id, "cti")}
+                    disabled={grupos[l.id] !== "cti" && contCti >= 14}
+                    style={{ cursor: "pointer", fontSize: 11, padding: "3px 8px", borderRadius: 4,
+                      background: grupos[l.id] === "cti" ? C.monitor : "transparent",
+                      color: grupos[l.id] === "cti" ? C.ink : C.monitor,
+                      border: `1px solid ${C.monitor}88`, fontWeight: 700,
+                      opacity: grupos[l.id] !== "cti" && contCti >= 14 ? 0.35 : 1 }}>CTI</button>
+                </div>
               ))}
-            </div>}
-        </>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn onClick={salvarCiclo}>Gerar escala e salvar ciclo</Btn>
+              <Btn tone="ghost" onClick={() => { setCriando(false); setGrupos({}); }}>Cancelar</Btn>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {[...state.ciclos].sort((a, b) => b.inicio.localeCompare(a.inicio)).map((c) => (
+        <GradeCiclo key={c.id} ciclo={c} nomeDe={nomeDe}
+          onProximoCiclo={proximoCiclo} onMudarDia={mudarDia} onRemover={removerCiclo} />
+      ))}
+      {state.ciclos.length === 0 && (
+        <Empty>Nenhum ciclo criado ainda. O primeiro ciclo define os grupos; os seguintes
+          podem ser gerados com um clique, trocando UPA e CTI automaticamente.</Empty>
       )}
     </Section>
+  );
+}
+
+function GradeCiclo({ ciclo: c, nomeDe, onProximoCiclo, onMudarDia, onRemover }) {
+  const fim = addDias(c.inicio, c.semanas * 7 - 1);
+  const linha = (rotulo, cor, itens) => (
+    <tr>
+      <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 9px", borderRadius: 6,
+          background: `${cor}26`, color: cor }}>{rotulo}</span>
+      </td>
+      {DIAS.map((_, dia) => {
+        const a = itens.find((x) => x.dia === dia);
+        return (
+          <td key={dia} style={{ padding: "6px 8px", borderLeft: `1px solid ${C.line}`,
+            fontSize: 12.5, color: a ? C.text : C.dim, textAlign: "center" }}>
+            {a ? nomeDe(a.ligante_id).split(" ")[0] : "—"}
+          </td>
+        );
+      })}
+    </tr>
+  );
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <h3 style={{ fontFamily: "'Space Grotesk'", fontSize: 15, margin: 0 }}>{c.nome}</h3>
+        <span style={{ fontSize: 12, color: C.dim }}>
+          {fmtData(c.inicio)} – {fmtData(fim)} · {c.semanas} semanas
+        </span>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
+          <Btn tone="ghost" small onClick={() => onProximoCiclo(c)}>
+            <Repeat size={13} /> Gerar próximo ciclo
+          </Btn>
+          <Trash2 className="rowdel" size={16} color={C.dim}
+            style={{ cursor: "pointer" }} onClick={() => onRemover(c.id)} />
+        </div>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th></th>
+              {DIAS.map((d) => (
+                <th key={d} style={{ fontSize: 11, color: C.dim, padding: "4px 8px",
+                  letterSpacing: "0.05em" }}>{d}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {linha("UPA 7h–19h", C.amber, c.upa || [])}
+            {linha("CTI Dia", C.monitor, (c.cti || []).filter((a) => a.turno === "dia"))}
+            {linha("CTI Noite", C.noite, (c.cti || []).filter((a) => a.turno === "noite"))}
+          </tbody>
+        </table>
+      </div>
+      <details style={{ marginTop: 10 }}>
+        <summary style={{ cursor: "pointer", fontSize: 12.5, color: C.dim }}>
+          Ajustar dia e turno manualmente
+        </summary>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(230px,1fr))",
+          gap: 8, marginTop: 10 }}>
+          {(c.upa || []).map((a) => (
+            <div key={"u" + a.ligante_id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: C.amber }}>UPA</span>
+              <span style={{ fontSize: 12.5, flex: 1, overflow: "hidden", textOverflow: "ellipsis",
+                whiteSpace: "nowrap" }}>{nomeDe(a.ligante_id)}</span>
+              <select style={{ ...inputStyle, padding: "4px 6px", fontSize: 12, width: "auto" }}
+                value={a.dia} onChange={(e) => onMudarDia(c, "upa", a.ligante_id, "dia", e.target.value)}>
+                {DIAS.map((d, i) => <option key={i} value={i}>{d}</option>)}
+              </select>
+            </div>
+          ))}
+          {(c.cti || []).map((a) => (
+            <div key={"c" + a.ligante_id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 700,
+                color: a.turno === "dia" ? C.monitor : C.noite }}>CTI</span>
+              <span style={{ fontSize: 12.5, flex: 1, overflow: "hidden", textOverflow: "ellipsis",
+                whiteSpace: "nowrap" }}>{nomeDe(a.ligante_id)}</span>
+              <select style={{ ...inputStyle, padding: "4px 6px", fontSize: 12, width: "auto" }}
+                value={a.dia} onChange={(e) => onMudarDia(c, "cti", a.ligante_id, "dia", e.target.value)}>
+                {DIAS.map((d, i) => <option key={i} value={i}>{d}</option>)}
+              </select>
+              <select style={{ ...inputStyle, padding: "4px 6px", fontSize: 12, width: "auto" }}
+                value={a.turno} onChange={(e) => onMudarDia(c, "cti", a.ligante_id, "turno", e.target.value)}>
+                <option value="dia">Dia</option>
+                <option value="noite">Noite</option>
+              </select>
+            </div>
+          ))}
+        </div>
+      </details>
+    </Card>
   );
 }
 
